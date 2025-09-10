@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-2.0
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * os05a20 driver
  *
@@ -18,14 +18,13 @@
 #include <linux/sysfs.h>
 #include <linux/slab.h>
 #include <linux/version.h>
-#include <linux/rk-camera-module.h>
+/* Removed Rockchip-specific camera module header */
 #include <media/media-entity.h>
 #include <media/v4l2-async.h>
 #include <media/v4l2-ctrls.h>
 #include <media/v4l2-subdev.h>
 #include <linux/pinctrl/consumer.h>
-#include <linux/rk-preisp.h>
-#include "../platform/rockchip/isp/rkisp_tb_helper.h"
+/* Removed Rockchip-specific pre-ISP and thunderboot headers */
 
 #define DRIVER_VERSION			KERNEL_VERSION(0, 0x01, 0x01)
 
@@ -37,7 +36,21 @@
 
 #define PIXEL_RATE_WITH_750M		(MIPI_FREQ_750M * 2 / 12 * 4)
 
-#define OF_CAMERA_HDR_MODE		"rockchip,camera-hdr-mode"
+/* Runtime HDR mode selection (no DT property) */
+static int os05a20_hdr_default;
+module_param(os05a20_hdr_default, int, 0644);
+MODULE_PARM_DESC(os05a20_hdr_default, "Default HDR: 0=linear, 1=HDR X2");
+
+/* Minimal HDR mode values */
+enum os05a20_hdr_mode {
+	NO_HDR = 0,
+	HDR_X2 = 1,
+};
+
+/* For legacy references that expect a VC-style HDR enum */
+#ifndef HDR_NORMAL_VC
+#define HDR_NORMAL_VC 0
+#endif
 
 #define OS05A20_XVCLK_FREQ		24000000
 
@@ -86,10 +99,13 @@
 
 #define OS05A20_LANES			4
 
-#define OF_CAMERA_PINCTRL_STATE_DEFAULT	"rockchip,camera_default"
-#define OF_CAMERA_PINCTRL_STATE_SLEEP	"rockchip,camera_sleep"
+/* Use generic pinctrl state names */
+#define OF_CAMERA_PINCTRL_STATE_DEFAULT	"default"
+#define OF_CAMERA_PINCTRL_STATE_SLEEP	"sleep"
 
 #define OS05A20_NAME			"os05a20"
+
+/* No DT HDR property used; runtime only */
 
 #define USED_SYS_DEBUG
 
@@ -121,7 +137,6 @@ struct os05a20_mode {
 	u32 exp_def;
 	const struct regval *reg_list;
 	u32 hdr_mode;
-	u32 vc[PAD_MAX];
 };
 
 struct os05a20 {
@@ -159,10 +174,6 @@ struct os05a20 {
 	const char		*module_name;
 	const char		*len_name;
 	bool			has_init_exp;
-	struct preisp_hdrae_exp_s init_hdrae_exp;
-	bool			is_thunderboot;
-	bool			is_thunderboot_ng;
-	bool			is_first_streamoff;
 };
 
 #define to_os05a20(sd) container_of(sd, struct os05a20, subdev)
@@ -651,12 +662,12 @@ static const struct os05a20_mode supported_modes[] = {
 			.numerator = 10000,
 			.denominator = 300000,
 		},
-		.exp_def = 0x09a0,
+	.exp_def = 0x0da5,
 		.hts_def = 0x02d0 * 4,
 		.vts_def = 0x0dad,
 		.reg_list = os05a20_linear12bit_2688x1944_regs,
 		.hdr_mode = NO_HDR,
-		.vc[PAD0] = V4L2_MBUS_CSI2_CHANNEL_0,
+		/* single VC */
 	},
 	{
 		.bus_fmt = MEDIA_BUS_FMT_SBGGR12_1X12,
@@ -671,10 +682,7 @@ static const struct os05a20_mode supported_modes[] = {
 		.vts_def = 0x09c4,
 		.reg_list = os05a20_hdr12bit_2688x1944_regs,
 		.hdr_mode = HDR_X2,
-		.vc[PAD0] = V4L2_MBUS_CSI2_CHANNEL_1,
-		.vc[PAD1] = V4L2_MBUS_CSI2_CHANNEL_0,//L->csi wr0
-		.vc[PAD2] = V4L2_MBUS_CSI2_CHANNEL_1,
-		.vc[PAD3] = V4L2_MBUS_CSI2_CHANNEL_1,//M->csi wr2 //Á½Õë¹Ì¶¨¶ÌÖ¡
+		/* dual-exposure on separate VCs not used */
 	},
 };
 
@@ -701,7 +709,7 @@ static int os05a20_write_reg(struct i2c_client *client, u16 reg,
 	u8 *val_p;
 	__be32 val_be;
 
-	if (len > 4)
+	if (len < 1 || len > 4)
 		return -EINVAL;
 
 	buf[0] = reg >> 8;
@@ -800,8 +808,8 @@ os05a20_find_best_fit(struct os05a20 *os05a20, struct v4l2_subdev_format *fmt)
 }
 
 static int os05a20_set_fmt(struct v4l2_subdev *sd,
-			  struct v4l2_subdev_pad_config *cfg,
-			  struct v4l2_subdev_format *fmt)
+		  struct v4l2_subdev_state *state,
+		  struct v4l2_subdev_format *fmt)
 {
 	struct os05a20 *os05a20 = to_os05a20(sd);
 	const struct os05a20_mode *mode;
@@ -815,12 +823,7 @@ static int os05a20_set_fmt(struct v4l2_subdev *sd,
 	fmt->format.height = mode->height;
 	fmt->format.field = V4L2_FIELD_NONE;
 	if (fmt->which == V4L2_SUBDEV_FORMAT_TRY) {
-#ifdef CONFIG_VIDEO_V4L2_SUBDEV_API
-		*v4l2_subdev_get_try_format(sd, cfg, fmt->pad) = fmt->format;
-#else
-		mutex_unlock(&os05a20->mutex);
-		return -ENOTTY;
-#endif
+		/* nothing to store in state explicitly here */
 	} else {
 		os05a20->cur_mode = mode;
 		h_blank = mode->hts_def - mode->width;
@@ -838,29 +841,26 @@ static int os05a20_set_fmt(struct v4l2_subdev *sd,
 }
 
 static int os05a20_get_fmt(struct v4l2_subdev *sd,
-			  struct v4l2_subdev_pad_config *cfg,
-			  struct v4l2_subdev_format *fmt)
+		  struct v4l2_subdev_state *state,
+		  struct v4l2_subdev_format *fmt)
 {
 	struct os05a20 *os05a20 = to_os05a20(sd);
 	const struct os05a20_mode *mode = os05a20->cur_mode;
 
 	mutex_lock(&os05a20->mutex);
 	if (fmt->which == V4L2_SUBDEV_FORMAT_TRY) {
-#ifdef CONFIG_VIDEO_V4L2_SUBDEV_API
-		fmt->format = *v4l2_subdev_get_try_format(sd, cfg, fmt->pad);
-#else
-		mutex_unlock(&os05a20->mutex);
-		return -ENOTTY;
-#endif
+		/* return current mode as TRY */
+		fmt->format.width = mode->width;
+		fmt->format.height = mode->height;
+		fmt->format.code = mode->bus_fmt;
+		fmt->format.field = V4L2_FIELD_NONE;
 	} else {
 		fmt->format.width = mode->width;
 		fmt->format.height = mode->height;
 		fmt->format.code = mode->bus_fmt;
 		fmt->format.field = V4L2_FIELD_NONE;
-		if (fmt->pad < PAD_MAX && mode->hdr_mode != NO_HDR)
-			fmt->reserved[0] = mode->vc[fmt->pad];
-		else
-			fmt->reserved[0] = mode->vc[PAD0];
+	/* no VC annotations on fmt in this port */
+	fmt->reserved[0] = 0;
 	}
 	mutex_unlock(&os05a20->mutex);
 
@@ -868,8 +868,8 @@ static int os05a20_get_fmt(struct v4l2_subdev *sd,
 }
 
 static int os05a20_enum_mbus_code(struct v4l2_subdev *sd,
-				 struct v4l2_subdev_pad_config *cfg,
-				 struct v4l2_subdev_mbus_code_enum *code)
+			 struct v4l2_subdev_state *state,
+			 struct v4l2_subdev_mbus_code_enum *code)
 {
 	struct os05a20 *os05a20 = to_os05a20(sd);
 
@@ -881,8 +881,8 @@ static int os05a20_enum_mbus_code(struct v4l2_subdev *sd,
 }
 
 static int os05a20_enum_frame_sizes(struct v4l2_subdev *sd,
-				   struct v4l2_subdev_pad_config *cfg,
-				   struct v4l2_subdev_frame_size_enum *fse)
+			   struct v4l2_subdev_state *state,
+			   struct v4l2_subdev_frame_size_enum *fse)
 {
 	struct os05a20 *os05a20 = to_os05a20(sd);
 
@@ -914,303 +914,39 @@ static int os05a20_enable_test_pattern(struct os05a20 *os05a20, u32 pattern)
 	return ret;
 }
 
-static int os05a20_g_frame_interval(struct v4l2_subdev *sd,
-				   struct v4l2_subdev_frame_interval *fi)
-{
-	struct os05a20 *os05a20 = to_os05a20(sd);
-	const struct os05a20_mode *mode = os05a20->cur_mode;
-
-	mutex_lock(&os05a20->mutex);
-	fi->interval = mode->max_fps;
-	mutex_unlock(&os05a20->mutex);
-
-	return 0;
-}
+/* g_frame_interval removed in newer kernels */
 
 static int os05a20_g_mbus_config(struct v4l2_subdev *sd, unsigned int pad_id,
 				struct v4l2_mbus_config *config)
 {
 	struct os05a20 *os05a20 = to_os05a20(sd);
 	const struct os05a20_mode *mode = os05a20->cur_mode;
-	u32 val = 0;
-
-	if (mode->hdr_mode == NO_HDR)
-		val = 1 << (OS05A20_LANES - 1) |
-		V4L2_MBUS_CSI2_CHANNEL_0 |
-		V4L2_MBUS_CSI2_CONTINUOUS_CLOCK;
-	if (mode->hdr_mode == HDR_X2)
-		val = 1 << (OS05A20_LANES - 1) |
-		V4L2_MBUS_CSI2_CHANNEL_0 |
-		V4L2_MBUS_CSI2_CONTINUOUS_CLOCK |
-		V4L2_MBUS_CSI2_CHANNEL_1;
-
 	config->type = V4L2_MBUS_CSI2_DPHY;
-	config->flags = val;
+#if defined(CONFIG_VIDEO_V4L2_TPG) || defined(V4L2_MBUS_CSI2_4_LANE)
+	/* If struct has explicit bus union, set lanes where available */
+	config->bus.mipi_csi2.num_data_lanes = OS05A20_LANES;
+#endif
 
 	return 0;
 }
 
-static void os05a20_get_module_inf(struct os05a20 *os05a20,
-				  struct rkmodule_inf *inf)
-{
-	memset(inf, 0, sizeof(*inf));
-	strlcpy(inf->base.sensor, OS05A20_NAME, sizeof(inf->base.sensor));
-	strlcpy(inf->base.module, os05a20->module_name,
-		sizeof(inf->base.module));
-	strlcpy(inf->base.lens, os05a20->len_name, sizeof(inf->base.lens));
-}
+/* Rockchip module info removed */
 
-static int os05a20_set_hdrae(struct os05a20 *os05a20,
-			     struct preisp_hdrae_exp_s *ae)
-{
-	u32 m_exp_time, s_exp_time;
-	u32 m_gain, s_gain;
-	u32 m_d_gain = 1024;
-	u32 s_d_gain = 1024;
-	int ret = 0;
-
-	if (!os05a20->has_init_exp && !os05a20->streaming) {
-		os05a20->init_hdrae_exp = *ae;
-		os05a20->has_init_exp = true;
-		dev_dbg(&os05a20->client->dev, "os05a20 don't stream, record exp for hdr!\n");
-		return ret;
-	}
-	m_exp_time = ae->middle_exp_reg;
-	s_exp_time = ae->short_exp_reg;
-	m_gain = ae->middle_gain_reg;
-	s_gain = ae->short_gain_reg;
-	dev_dbg(&os05a20->client->dev,
-		"rev exp req: L_exp: 0x%x, 0x%x, S_exp: 0x%x, 0x%x\n",
-		m_exp_time, m_gain,
-		s_exp_time, s_gain);
-
-	if (m_exp_time <= s_exp_time || m_exp_time < 4 || s_exp_time < 4) {
-		dev_err(&os05a20->client->dev,
-			"long exposure must bigger than short exposure,min exposure is 4 line\n");
-		return -EINVAL;
-	}
-
-	if (m_gain > 1984) {// >15.5x
-		m_d_gain = m_gain * 10 / 155;
-		m_gain = 1984;
-	}
-
-	if (s_gain > 1984) {// >15.5x
-		s_d_gain = s_gain * 10 / 155;
-		s_gain = 1984;
-	}
-	dev_dbg(&os05a20->client->dev,
-		"set exp: L_exp: 0x%x, 0x%x 0x%x, S_exp: 0x%x, 0x%x, 0x%x\n",
-		m_exp_time, m_gain, m_d_gain,
-		s_exp_time, s_gain, s_d_gain);
-
-	ret = os05a20_write_reg(os05a20->client,
-				OS05A20_GROUP_UPDATE_ADDRESS,
-				OS05A20_REG_VALUE_08BIT,
-				OS05A20_GROUP_UPDATE_START_DATA);
-
-	ret |= os05a20_write_reg(os05a20->client,
-				OS05A20_REG_EXP_LONG_H,
-				OS05A20_REG_VALUE_16BIT,
-				m_exp_time);
-	ret |= os05a20_write_reg(os05a20->client,
-				OS05A20_REG_EXP_VS_H,
-				OS05A20_REG_VALUE_16BIT,
-				s_exp_time);
-
-	ret |= os05a20_write_reg(os05a20->client,
-				OS05A20_REG_AGAIN_LONG_H,
-				OS05A20_REG_VALUE_16BIT,
-				m_gain & 0x7ff);
-	ret |= os05a20_write_reg(os05a20->client,
-				OS05A20_REG_DGAIN_LONG_H,
-				OS05A20_REG_VALUE_16BIT,
-				m_d_gain & 0x3fff);
-
-	ret |= os05a20_write_reg(os05a20->client,
-				OS05A20_REG_AGAIN_VS_H,
-				OS05A20_REG_VALUE_16BIT,
-				s_gain & 0x7ff);
-	ret |= os05a20_write_reg(os05a20->client,
-				OS05A20_REG_DGAIN_VS_H,
-				OS05A20_REG_VALUE_16BIT,
-				s_d_gain & 0x3fff);
-	ret |= os05a20_write_reg(os05a20->client,
-				OS05A20_GROUP_UPDATE_ADDRESS,
-				OS05A20_REG_VALUE_08BIT,
-				OS05A20_GROUP_UPDATE_END_DATA);
-	ret |= os05a20_write_reg(os05a20->client,
-				OS05A20_GROUP_UPDATE_ADDRESS,
-				OS05A20_REG_VALUE_08BIT,
-				OS05A20_GROUP_UPDATE_LAUNCH);
-	return ret;
-}
+/* HDR AE private ioctl not supported on TI; no-op */
 
 static long os05a20_ioctl(struct v4l2_subdev *sd, unsigned int cmd, void *arg)
 {
-	struct os05a20 *os05a20 = to_os05a20(sd);
-	struct rkmodule_hdr_cfg *hdr_cfg;
-	long ret = 0;
-	u32 i, h, w;
-	u32 stream = 0;
-
-	switch (cmd) {
-	case PREISP_CMD_SET_HDRAE_EXP:
-		return os05a20_set_hdrae(os05a20, arg);
-	case RKMODULE_SET_HDR_CFG:
-		hdr_cfg = (struct rkmodule_hdr_cfg *)arg;
-		w = os05a20->cur_mode->width;
-		h = os05a20->cur_mode->height;
-		for (i = 0; i < os05a20->cfg_num; i++) {
-			if (w == supported_modes[i].width &&
-			h == supported_modes[i].height &&
-			supported_modes[i].hdr_mode == hdr_cfg->hdr_mode) {
-				os05a20->cur_mode = &supported_modes[i];
-				break;
-			}
-		}
-		if (i == os05a20->cfg_num) {
-			dev_err(&os05a20->client->dev,
-				"not find hdr mode:%d %dx%d config\n",
-				hdr_cfg->hdr_mode, w, h);
-			ret = -EINVAL;
-		} else {
-			w = os05a20->cur_mode->hts_def - os05a20->cur_mode->width;
-			h = os05a20->cur_mode->vts_def - os05a20->cur_mode->height;
-			__v4l2_ctrl_modify_range(os05a20->hblank, w, w, 1, w);
-			__v4l2_ctrl_modify_range(os05a20->vblank, h,
-				OS05A20_VTS_MAX - os05a20->cur_mode->height,
-				1, h);
-			dev_info(&os05a20->client->dev,
-				"sensor mode: %d\n",
-				os05a20->cur_mode->hdr_mode);
-		}
-		break;
-	case RKMODULE_GET_MODULE_INFO:
-		os05a20_get_module_inf(os05a20, (struct rkmodule_inf *)arg);
-		break;
-	case RKMODULE_GET_HDR_CFG:
-		hdr_cfg = (struct rkmodule_hdr_cfg *)arg;
-		hdr_cfg->esp.mode = HDR_NORMAL_VC;
-		hdr_cfg->hdr_mode = os05a20->cur_mode->hdr_mode;
-		break;
-	case RKMODULE_SET_CONVERSION_GAIN:
-		ret = -EINVAL;
-		break;
-	case RKMODULE_SET_QUICK_STREAM:
-
-		stream = *((u32 *)arg);
-
-		if (stream)
-			ret = os05a20_write_reg(os05a20->client, OS05A20_REG_CTRL_MODE,
-				OS05A20_REG_VALUE_08BIT, OS05A20_MODE_STREAMING);
-		else
-			ret = os05a20_write_reg(os05a20->client, OS05A20_REG_CTRL_MODE,
-				OS05A20_REG_VALUE_08BIT, OS05A20_MODE_SW_STANDBY);
-		break;
-	default:
-		ret = -ENOIOCTLCMD;
-		break;
-	}
-
-	return ret;
+	/* No private ioctls supported */
+	return -ENOIOCTLCMD;
 }
 
-#ifdef CONFIG_COMPAT
-static long os05a20_compat_ioctl32(struct v4l2_subdev *sd,
-				   unsigned int cmd, unsigned long arg)
-{
-	void __user *up = compat_ptr(arg);
-	struct rkmodule_inf *inf;
-	struct rkmodule_awb_cfg *cfg;
-	struct rkmodule_hdr_cfg *hdr;
-	struct preisp_hdrae_exp_s *hdrae;
-	long ret;
-	u32 stream = 0;
-
-	switch (cmd) {
-	case RKMODULE_GET_MODULE_INFO:
-		inf = kzalloc(sizeof(*inf), GFP_KERNEL);
-		if (!inf) {
-			ret = -ENOMEM;
-			return ret;
-		}
-
-		ret = os05a20_ioctl(sd, cmd, inf);
-		if (!ret)
-			ret = copy_to_user(up, inf, sizeof(*inf));
-		kfree(inf);
-		break;
-	case RKMODULE_AWB_CFG:
-		cfg = kzalloc(sizeof(*cfg), GFP_KERNEL);
-		if (!cfg) {
-			ret = -ENOMEM;
-			return ret;
-		}
-
-		ret = copy_from_user(cfg, up, sizeof(*cfg));
-		if (!ret)
-			ret = os05a20_ioctl(sd, cmd, cfg);
-		kfree(cfg);
-		break;
-	case RKMODULE_GET_HDR_CFG:
-		hdr = kzalloc(sizeof(*hdr), GFP_KERNEL);
-		if (!hdr) {
-			ret = -ENOMEM;
-			return ret;
-		}
-
-		ret = os05a20_ioctl(sd, cmd, hdr);
-		if (!ret)
-			ret = copy_to_user(up, hdr, sizeof(*hdr));
-		kfree(hdr);
-		break;
-	case RKMODULE_SET_HDR_CFG:
-		hdr = kzalloc(sizeof(*hdr), GFP_KERNEL);
-		if (!hdr) {
-			ret = -ENOMEM;
-			return ret;
-		}
-
-		ret = copy_from_user(hdr, up, sizeof(*hdr));
-		if (!ret)
-			ret = os05a20_ioctl(sd, cmd, hdr);
-		kfree(hdr);
-		break;
-	case PREISP_CMD_SET_HDRAE_EXP:
-		hdrae = kzalloc(sizeof(*hdrae), GFP_KERNEL);
-		if (!hdrae) {
-			ret = -ENOMEM;
-			return ret;
-		}
-
-		ret = copy_from_user(hdrae, up, sizeof(*hdrae));
-		if (!ret)
-			ret = os05a20_ioctl(sd, cmd, hdrae);
-		kfree(hdrae);
-		break;
-	case RKMODULE_SET_CONVERSION_GAIN:
-		ret = -EINVAL;
-		break;
-	case RKMODULE_SET_QUICK_STREAM:
-		ret = copy_from_user(&stream, up, sizeof(u32));
-		if (!ret)
-			ret = os05a20_ioctl(sd, cmd, &stream);
-		break;
-	default:
-		ret = -ENOIOCTLCMD;
-		break;
-	}
-
-	return ret;
-}
-#endif
+/* No compat ioctl32 path required */
 
 static int __os05a20_start_stream(struct os05a20 *os05a20)
 {
 	int ret;
 
-	if (!os05a20->is_thunderboot) {
+	{
 		ret = os05a20_write_array(os05a20->client, os05a20_global_regs);
 		if (ret) {
 			dev_err(&os05a20->client->dev,
@@ -1227,16 +963,6 @@ static int __os05a20_start_stream(struct os05a20 *os05a20)
 	ret = __v4l2_ctrl_handler_setup(&os05a20->ctrl_handler);
 	if (ret)
 		return ret;
-	if (os05a20->has_init_exp && os05a20->cur_mode->hdr_mode != NO_HDR) {
-		ret = os05a20_ioctl(&os05a20->subdev,
-				    PREISP_CMD_SET_HDRAE_EXP,
-				    &os05a20->init_hdrae_exp);
-		if (ret) {
-			dev_err(&os05a20->client->dev,
-				"init exp fail in hdr mode\n");
-			return ret;
-		}
-	}
 	return	os05a20_write_reg(os05a20->client, OS05A20_REG_CTRL_MODE,
 		OS05A20_REG_VALUE_08BIT, OS05A20_MODE_STREAMING);
 }
@@ -1244,8 +970,6 @@ static int __os05a20_start_stream(struct os05a20 *os05a20)
 static int __os05a20_stop_stream(struct os05a20 *os05a20)
 {
 	os05a20->has_init_exp = false;
-	if (os05a20->is_thunderboot)
-		os05a20->is_first_streamoff = true;
 	return os05a20_write_reg(os05a20->client, OS05A20_REG_CTRL_MODE,
 		OS05A20_REG_VALUE_08BIT, OS05A20_MODE_SW_STANDBY);
 }
@@ -1262,10 +986,6 @@ static int os05a20_s_stream(struct v4l2_subdev *sd, int on)
 		goto unlock_and_return;
 
 	if (on) {
-		if (os05a20->is_thunderboot && rkisp_tb_get_state() == RKISP_TB_NG) {
-			os05a20->is_thunderboot = false;
-			__os05a20_power_on(os05a20);
-		}
 		ret = pm_runtime_get_sync(&client->dev);
 		if (ret < 0) {
 			pm_runtime_put_noidle(&client->dev);
@@ -1310,13 +1030,11 @@ static int os05a20_s_power(struct v4l2_subdev *sd, int on)
 			goto unlock_and_return;
 		}
 
-		if (!os05a20->is_thunderboot) {
-			ret |= os05a20_write_reg(os05a20->client,
-						 OS05A20_SOFTWARE_RESET_REG,
-						 OS05A20_REG_VALUE_08BIT,
-						 0x01);
-			usleep_range(100, 200);
-		}
+		ret |= os05a20_write_reg(os05a20->client,
+					 OS05A20_SOFTWARE_RESET_REG,
+					 OS05A20_REG_VALUE_08BIT,
+					 0x01);
+		usleep_range(100, 200);
 
 		os05a20->power_on = true;
 	} else {
@@ -1342,8 +1060,7 @@ static int __os05a20_power_on(struct os05a20 *os05a20)
 	u32 delay_us;
 	struct device *dev = &os05a20->client->dev;
 
-	if (os05a20->is_thunderboot)
-		return 0;
+	/* Always perform full power-on on TI */
 
 	if (!IS_ERR_OR_NULL(os05a20->pins_default)) {
 		ret = pinctrl_select_state(os05a20->pinctrl,
@@ -1361,11 +1078,12 @@ static int __os05a20_power_on(struct os05a20 *os05a20)
 		dev_err(dev, "Failed to enable xvclk\n");
 		return ret;
 	}
-	if (!IS_ERR(os05a20->power_gpio)) {
+	if (os05a20->power_gpio) {
+		/* Assert power-enable if present */
 		gpiod_direction_output(os05a20->power_gpio, 1);
 		usleep_range(6000, 8000);
 	}
-	if (!IS_ERR(os05a20->reset_gpio))
+	if (os05a20->reset_gpio)
 		gpiod_direction_output(os05a20->reset_gpio, 1);
 
 	ret = regulator_bulk_enable(OS05A20_NUM_SUPPLIES, os05a20->supplies);
@@ -1374,17 +1092,17 @@ static int __os05a20_power_on(struct os05a20 *os05a20)
 		goto disable_clk;
 	}
 
-	if (!IS_ERR(os05a20->reset_gpio))
+	if (os05a20->reset_gpio)
 		gpiod_direction_output(os05a20->reset_gpio, 0);
 
 	usleep_range(500, 1000);
-	if (!IS_ERR(os05a20->pwdn_gpio))
+	if (os05a20->pwdn_gpio)
 		gpiod_direction_output(os05a20->pwdn_gpio, 1);
 	/*
 	 * There is no need to wait for the delay of RC circuit
 	 * if the reset signal is directly controlled by GPIO.
 	 */
-	if (!IS_ERR(os05a20->reset_gpio))
+	if (os05a20->reset_gpio)
 		usleep_range(6000, 8000);
 	else
 		usleep_range(12000, 16000);
@@ -1406,23 +1124,15 @@ static void __os05a20_power_off(struct os05a20 *os05a20)
 	int ret;
 	struct device *dev = &os05a20->client->dev;
 
-	if (os05a20->is_thunderboot) {
-		if (os05a20->is_first_streamoff) {
-			os05a20->is_thunderboot = false;
-			os05a20->is_first_streamoff = false;
-		} else {
-			return;
-		}
-	}
 
-	if (!IS_ERR(os05a20->pwdn_gpio))
+	if (os05a20->pwdn_gpio)
 		gpiod_direction_output(os05a20->pwdn_gpio, 0);
 
 	clk_disable_unprepare(os05a20->xvclk);
 
-	if (!IS_ERR(os05a20->reset_gpio))
+	if (os05a20->reset_gpio)
 		gpiod_direction_output(os05a20->reset_gpio, 0);
-	if (!IS_ERR(os05a20->power_gpio))
+	if (os05a20->power_gpio)
 		gpiod_direction_output(os05a20->power_gpio, 0);
 	if (!IS_ERR_OR_NULL(os05a20->pins_sleep)) {
 		ret = pinctrl_select_state(os05a20->pinctrl,
@@ -1431,10 +1141,7 @@ static void __os05a20_power_off(struct os05a20 *os05a20)
 			dev_dbg(dev, "could not set pins\n");
 	}
 
-	if (os05a20->is_thunderboot_ng) {
-		os05a20->is_thunderboot_ng = false;
-		regulator_bulk_disable(OS05A20_NUM_SUPPLIES, os05a20->supplies);
-	}
+	regulator_bulk_disable(OS05A20_NUM_SUPPLIES, os05a20->supplies);
 }
 
 static int os05a20_runtime_resume(struct device *dev)
@@ -1461,16 +1168,12 @@ static int os05a20_runtime_suspend(struct device *dev)
 static int os05a20_open(struct v4l2_subdev *sd, struct v4l2_subdev_fh *fh)
 {
 	struct os05a20 *os05a20 = to_os05a20(sd);
-	struct v4l2_mbus_framefmt *try_fmt =
-				v4l2_subdev_get_try_format(sd, fh->pad, 0);
+	struct v4l2_mbus_framefmt *try_fmt = NULL;
 	const struct os05a20_mode *def_mode = &supported_modes[0];
 
 	mutex_lock(&os05a20->mutex);
 	/* Initialize try_fmt */
-	try_fmt->width = def_mode->width;
-	try_fmt->height = def_mode->height;
-	try_fmt->code = def_mode->bus_fmt;
-	try_fmt->field = V4L2_FIELD_NONE;
+	/* No state-backed try_fmt; nothing to initialize here for newer API */
 
 	mutex_unlock(&os05a20->mutex);
 	/* No crop or compose */
@@ -1480,8 +1183,8 @@ static int os05a20_open(struct v4l2_subdev *sd, struct v4l2_subdev_fh *fh)
 #endif
 
 static int os05a20_enum_frame_interval(struct v4l2_subdev *sd,
-				       struct v4l2_subdev_pad_config *cfg,
-				       struct v4l2_subdev_frame_interval_enum *fie)
+									   struct v4l2_subdev_state *state,
+									   struct v4l2_subdev_frame_interval_enum *fie)
 {
 	struct os05a20 *os05a20 = to_os05a20(sd);
 
@@ -1510,14 +1213,10 @@ static const struct v4l2_subdev_internal_ops os05a20_internal_ops = {
 static const struct v4l2_subdev_core_ops os05a20_core_ops = {
 	.s_power = os05a20_s_power,
 	.ioctl = os05a20_ioctl,
-#ifdef CONFIG_COMPAT
-	.compat_ioctl32 = os05a20_compat_ioctl32,
-#endif
 };
 
 static const struct v4l2_subdev_video_ops os05a20_video_ops = {
 	.s_stream = os05a20_s_stream,
-	.g_frame_interval = os05a20_g_frame_interval,
 };
 
 static const struct v4l2_subdev_pad_ops os05a20_pad_ops = {
@@ -1557,12 +1256,41 @@ static int os05a20_set_ctrl(struct v4l2_ctrl *ctrl)
 						os05a20->exposure->default_value);
 			break;
 		}
+		break;
+	case V4L2_CID_WIDE_DYNAMIC_RANGE: {
+		/* Toggle between linear and HDR_X2 */
+		u32 target_hdr = ctrl->val ? HDR_X2 : NO_HDR;
+		int i;
+		const struct os05a20_mode *new_mode = NULL;
+		if (os05a20->cur_mode->hdr_mode == target_hdr)
+			break;
+		for (i = 0; i < os05a20->cfg_num; i++) {
+			if (supported_modes[i].hdr_mode == target_hdr) {
+				new_mode = &supported_modes[i];
+				break;
+			}
+		}
+		if (!new_mode)
+			return -EINVAL;
+		if (os05a20->streaming) {
+			__os05a20_stop_stream(os05a20);
+			os05a20->cur_mode = new_mode;
+			ret = __os05a20_start_stream(os05a20);
+		} else {
+			os05a20->cur_mode = new_mode;
+		}
+		break;
+	}
 	}
 
 	if (!pm_runtime_get_if_in_use(&client->dev))
 		return 0;
 
 	switch (ctrl->id) {
+	case V4L2_CID_WIDE_DYNAMIC_RANGE:
+		/* Mode switch handled above; no direct register writes here */
+		ret = 0;
+		break;
 	case V4L2_CID_EXPOSURE:
 		if (os05a20->cur_mode->hdr_mode != NO_HDR)
 			return 0;
@@ -1629,7 +1357,8 @@ static int os05a20_set_ctrl(struct v4l2_ctrl *ctrl)
 					val);
 		break;
 	default:
-		dev_warn(&client->dev, "%s Unhandled id:0x%x, val:0x%x\n",
+		/* Unknown/unsupported control: keep logs quiet in production */
+		dev_dbg(&client->dev, "%s Unhandled id:0x%x, val:0x%x\n",
 			 __func__, ctrl->id, ctrl->val);
 		break;
 	}
@@ -1653,14 +1382,14 @@ static int os05a20_initialize_controls(struct os05a20 *os05a20)
 
 	handler = &os05a20->ctrl_handler;
 	mode = os05a20->cur_mode;
-	ret = v4l2_ctrl_handler_init(handler, 9);
+	ret = v4l2_ctrl_handler_init(handler, 10);
 	if (ret)
 		return ret;
 	handler->lock = &os05a20->mutex;
 
 	os05a20->link_freq = v4l2_ctrl_new_int_menu(handler, NULL,
 			V4L2_CID_LINK_FREQ,
-			1, 0, link_freq_menu_items);
+			ARRAY_SIZE(link_freq_menu_items) - 1, 0, link_freq_menu_items);
 	/* pixel rate = link frequency * 2 * lanes / BITS_PER_SAMPLE */
 	os05a20->pixel_rate = v4l2_ctrl_new_std(handler, NULL,
 			V4L2_CID_PIXEL_RATE,
@@ -1701,6 +1430,11 @@ static int os05a20_initialize_controls(struct os05a20 *os05a20)
 
 	os05a20->v_flip = v4l2_ctrl_new_std(handler, &os05a20_ctrl_ops,
 					    V4L2_CID_VFLIP, 0, 1, 1, 0);
+
+	/* Add WDR control */
+	v4l2_ctrl_new_std(handler, &os05a20_ctrl_ops,
+					  V4L2_CID_WIDE_DYNAMIC_RANGE, 0, 1, 1,
+					  os05a20->cur_mode->hdr_mode != NO_HDR);
 	if (handler->error) {
 		ret = handler->error;
 		dev_err(&os05a20->client->dev,
@@ -1720,16 +1454,11 @@ err_free_handler:
 }
 
 static int os05a20_check_sensor_id(struct os05a20 *os05a20,
-				  struct i2c_client *client)
+								  struct i2c_client *client)
 {
 	struct device *dev = &os05a20->client->dev;
 	u32 id = 0;
 	int ret;
-
-	if (os05a20->is_thunderboot) {
-		dev_info(dev, "Enable thunderboot mode, skip sensor id check\n");
-		return 0;
-	}
 
 	ret = os05a20_read_reg(client, OS05A20_REG_CHIP_ID,
 			       OS05A20_REG_VALUE_24BIT, &id);
@@ -1755,8 +1484,7 @@ static int os05a20_configure_regulators(struct os05a20 *os05a20)
 				       os05a20->supplies);
 }
 
-static int os05a20_probe(struct i2c_client *client,
-			const struct i2c_device_id *id)
+static int os05a20_probe(struct i2c_client *client)
 {
 	struct device *dev = &client->dev;
 	struct device_node *node = dev->of_node;
@@ -1775,26 +1503,14 @@ static int os05a20_probe(struct i2c_client *client,
 	if (!os05a20)
 		return -ENOMEM;
 
-	ret = of_property_read_u32(node, RKMODULE_CAMERA_MODULE_INDEX,
-				   &os05a20->module_index);
-	ret |= of_property_read_string(node, RKMODULE_CAMERA_MODULE_FACING,
-				       &os05a20->module_facing);
-	ret |= of_property_read_string(node, RKMODULE_CAMERA_MODULE_NAME,
-				       &os05a20->module_name);
-	ret |= of_property_read_string(node, RKMODULE_CAMERA_LENS_NAME,
-				       &os05a20->len_name);
-	if (ret) {
-		dev_err(dev, "could not get module information!\n");
-		return -EINVAL;
-	}
+	/* Optional module metadata; do not fail if absent */
+	of_property_read_u32(node, "module-index", &os05a20->module_index);
+	of_property_read_string(node, "module-facing", &os05a20->module_facing);
+	of_property_read_string(node, "module-name", &os05a20->module_name);
+	of_property_read_string(node, "lens-name", &os05a20->len_name);
 
-	os05a20->is_thunderboot = IS_ENABLED(CONFIG_VIDEO_ROCKCHIP_THUNDER_BOOT_ISP);
-	ret = of_property_read_u32(node, OF_CAMERA_HDR_MODE,
-				   &hdr_mode);
-	if (ret) {
-		hdr_mode = NO_HDR;
-		dev_warn(dev, " Get hdr mode failed! no hdr default\n");
-	}
+	/* Default HDR mode from module parameter */
+	hdr_mode = os05a20_hdr_default ? HDR_X2 : NO_HDR;
 	os05a20->cfg_num = ARRAY_SIZE(supported_modes);
 	for (i = 0; i < os05a20->cfg_num; i++) {
 		if (hdr_mode == supported_modes[i].hdr_mode) {
@@ -1811,16 +1527,22 @@ static int os05a20_probe(struct i2c_client *client,
 	}
 
 	os05a20->power_gpio = devm_gpiod_get(dev, "power", GPIOD_ASIS);
-	if (IS_ERR(os05a20->power_gpio))
-		dev_warn(dev, "Failed to get power-gpios\n");
+	if (IS_ERR(os05a20->power_gpio)) {
+		dev_warn(dev, "Power GPIO not available; continuing without it\n");
+		os05a20->power_gpio = NULL;
+	}
 
 	os05a20->reset_gpio = devm_gpiod_get(dev, "reset", GPIOD_ASIS);
-	if (IS_ERR(os05a20->reset_gpio))
-		dev_warn(dev, "Failed to get reset-gpios\n");
+	if (IS_ERR(os05a20->reset_gpio)) {
+		dev_warn(dev, "Reset GPIO not available; continuing without it\n");
+		os05a20->reset_gpio = NULL;
+	}
 
 	os05a20->pwdn_gpio = devm_gpiod_get(dev, "pwdn", GPIOD_ASIS);
-	if (IS_ERR(os05a20->pwdn_gpio))
-		dev_warn(dev, "Failed to get pwdn-gpios\n");
+	if (IS_ERR(os05a20->pwdn_gpio)) {
+		dev_warn(dev, "PWDN GPIO not available; continuing without it\n");
+		os05a20->pwdn_gpio = NULL;
+	}
 
 	os05a20->pinctrl = devm_pinctrl_get(dev);
 	if (!IS_ERR(os05a20->pinctrl)) {
@@ -1874,15 +1596,12 @@ static int os05a20_probe(struct i2c_client *client,
 #endif
 
 	memset(facing, 0, sizeof(facing));
-	if (strcmp(os05a20->module_facing, "back") == 0)
-		facing[0] = 'b';
-	else
-		facing[0] = 'f';
+	facing[0] = 'f';
 
 	snprintf(sd->name, sizeof(sd->name), "m%02d_%s_%s %s",
 		 os05a20->module_index, facing,
 		 OS05A20_NAME, dev_name(sd->dev));
-	ret = v4l2_async_register_subdev_sensor_common(sd);
+	ret = v4l2_async_register_subdev_sensor(sd);
 	if (ret) {
 		dev_err(dev, "v4l2 async register subdev failed\n");
 		goto err_clean_entity;
@@ -1907,7 +1626,7 @@ err_destroy_mutex:
 	return ret;
 }
 
-static int os05a20_remove(struct i2c_client *client)
+static void os05a20_remove(struct i2c_client *client)
 {
 	struct v4l2_subdev *sd = i2c_get_clientdata(client);
 	struct os05a20 *os05a20 = to_os05a20(sd);
@@ -1923,8 +1642,6 @@ static int os05a20_remove(struct i2c_client *client)
 	if (!pm_runtime_status_suspended(&client->dev))
 		__os05a20_power_off(os05a20);
 	pm_runtime_set_suspended(&client->dev);
-
-	return 0;
 }
 
 #if IS_ENABLED(CONFIG_OF)
@@ -1936,7 +1653,7 @@ MODULE_DEVICE_TABLE(of, os05a20_of_match);
 #endif
 
 static const struct i2c_device_id os05a20_match_id[] = {
-	{ "ovti,os05a20", 0 },
+	{ "os05a20", 0 },
 	{ },
 };
 
@@ -1947,26 +1664,18 @@ static struct i2c_driver os05a20_i2c_driver = {
 		.of_match_table = of_match_ptr(os05a20_of_match),
 	},
 	.probe		= &os05a20_probe,
-	.remove		= &os05a20_remove,
+	.remove	= &os05a20_remove,
 	.id_table	= os05a20_match_id,
 };
 
-#ifdef CONFIG_ROCKCHIP_THUNDER_BOOT
 module_i2c_driver(os05a20_i2c_driver);
-#else
-static int __init sensor_mod_init(void)
-{
-	return i2c_add_driver(&os05a20_i2c_driver);
-}
 
-static void __exit sensor_mod_exit(void)
-{
-	i2c_del_driver(&os05a20_i2c_driver);
-}
+MODULE_DESCRIPTION("OmniVision OS05A20 sensor driver");
+MODULE_LICENSE("GPL");
 
-device_initcall_sync(sensor_mod_init);
-module_exit(sensor_mod_exit);
-#endif
-
-MODULE_DESCRIPTION("OmniVision os05a20 sensor driver");
-MODULE_LICENSE("GPL v2");
+/*
+ * Note: Independent module senstar_r5_shmem provides /dev/senstar_r5_shmem
+ * with ioctls to atomically clear/read shared memory flags when interacting
+ * with the R5 core. Userland components should prefer that over ad-hoc
+ * devmem2 calls to avoid cache coherency pitfalls.
+ */

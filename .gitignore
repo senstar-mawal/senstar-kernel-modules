@@ -1,0 +1,23 @@
+# --- Build artifacts ---
+*.o
+*.ko
+*.mod
+*.mod.*
+*.mod.c
+*.symvers
+*.cmd
+
+modules.order
+Module.symvers
+
+*.log
+*.tmp
+oe-logs/
+oe-workdir/
+
+*~
+*.swp
+*.swo
+.DS_Store
+
+!*.c
