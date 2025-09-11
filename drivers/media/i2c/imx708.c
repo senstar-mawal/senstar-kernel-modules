@@ -1265,7 +1265,7 @@ static int imx708_enum_mbus_code(struct v4l2_subdev *sd,
 		if (code->index > 0)
 			return -EINVAL;
 
-		code->code = MEDIA_BUS_FMT_SENSOR_DATA;
+	code->code = MEDIA_BUS_FMT_SENSOR_DATA;
 	}
 
 	return 0;
@@ -1303,7 +1303,7 @@ static int imx708_enum_frame_size(struct v4l2_subdev *sd,
 		fse->min_height = mode_list[fse->index].height;
 		fse->max_height = fse->min_height;
 	} else {
-		if (fse->code != MEDIA_BUS_FMT_SENSOR_DATA || fse->index > 0)
+	if (fse->code != MEDIA_BUS_FMT_SENSOR_DATA || fse->index > 0)
 			return -EINVAL;
 
 		fse->min_width = IMX708_EMBEDDED_LINE_WIDTH;
