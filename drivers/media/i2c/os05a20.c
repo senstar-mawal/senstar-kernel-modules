@@ -662,9 +662,11 @@ static const struct os05a20_mode supported_modes[] = {
 			.numerator = 10000,
 			.denominator = 300000,
 		},
-	.exp_def = 0x0da5,
+	/* Match init table: 0x3501/0x3502 set to 0x09a0 */
+	.exp_def = 0x09a0,
 		.hts_def = 0x02d0 * 4,
-		.vts_def = 0x0dad,
+	/* Match init table VTS (0x380e/0x380f ~ 0x09c0); use 0x09c4 for margin */
+		.vts_def = 0x09c4,
 		.reg_list = os05a20_linear12bit_2688x1944_regs,
 		.hdr_mode = NO_HDR,
 		/* single VC */
@@ -900,6 +902,40 @@ static int os05a20_enum_frame_sizes(struct v4l2_subdev *sd,
 	return 0;
 }
 
+static int os05a20_get_frame_desc(struct v4l2_subdev *sd, unsigned int pad,
+								 struct v4l2_mbus_frame_desc *fd)
+{
+	struct v4l2_subdev_state *state;
+	struct v4l2_mbus_framefmt *fmt;
+	u32 bpp = 12;
+	int ret = 0;
+
+	if (pad != 0)
+		return -EINVAL;
+
+	state = v4l2_subdev_lock_and_get_active_state(sd);
+	fmt = v4l2_subdev_state_get_format(state, 0, 0);
+	if (!fmt) {
+		ret = -EPIPE;
+		goto out;
+	}
+
+	memset(fd, 0, sizeof(*fd));
+	fd->type = V4L2_MBUS_FRAME_DESC_TYPE_CSI2;
+
+	fd->entry[fd->num_entries].stream = 0;
+	fd->entry[fd->num_entries].flags = V4L2_MBUS_FRAME_DESC_FL_LEN_MAX;
+	fd->entry[fd->num_entries].length = fmt->width * fmt->height * bpp / 8;
+	fd->entry[fd->num_entries].pixelcode = fmt->code;
+	fd->entry[fd->num_entries].bus.csi2.vc = 0;
+	fd->entry[fd->num_entries].bus.csi2.dt = 0x2c; /* RAW12 */
+	fd->num_entries++;
+
+out:
+	v4l2_subdev_unlock_state(state);
+	return ret;
+}
+
 static int os05a20_enable_test_pattern(struct os05a20 *os05a20, u32 pattern)
 {
 	u32 val;
@@ -914,7 +950,7 @@ static int os05a20_enable_test_pattern(struct os05a20 *os05a20, u32 pattern)
 	return ret;
 }
 
-/* g_frame_interval removed in newer kernels */
+/* g_frame_interval not supported in this kernel; don't implement */
 
 static int os05a20_g_mbus_config(struct v4l2_subdev *sd, unsigned int pad_id,
 				struct v4l2_mbus_config *config)
@@ -922,10 +958,9 @@ static int os05a20_g_mbus_config(struct v4l2_subdev *sd, unsigned int pad_id,
 	struct os05a20 *os05a20 = to_os05a20(sd);
 	const struct os05a20_mode *mode = os05a20->cur_mode;
 	config->type = V4L2_MBUS_CSI2_DPHY;
-#if defined(CONFIG_VIDEO_V4L2_TPG) || defined(V4L2_MBUS_CSI2_4_LANE)
-	/* If struct has explicit bus union, set lanes where available */
+	/* Always advertise 4 CSI-2 lanes; continuous clock is default (flags=0) */
 	config->bus.mipi_csi2.num_data_lanes = OS05A20_LANES;
-#endif
+	config->bus.mipi_csi2.flags = 0;
 
 	return 0;
 }
@@ -955,6 +990,8 @@ static int __os05a20_start_stream(struct os05a20 *os05a20)
 		}
 
 		ret = os05a20_write_array(os05a20->client, os05a20->cur_mode->reg_list);
+	/* Allow MIPI/analog to settle before enabling streaming */
+	usleep_range(5000, 7000);
 		if (ret)
 			return ret;
 	}
@@ -1080,11 +1117,11 @@ static int __os05a20_power_on(struct os05a20 *os05a20)
 	}
 	if (os05a20->power_gpio) {
 		/* Assert power-enable if present */
-		gpiod_direction_output(os05a20->power_gpio, 1);
+	gpiod_set_value_cansleep(os05a20->power_gpio, 1);
 		usleep_range(6000, 8000);
 	}
 	if (os05a20->reset_gpio)
-		gpiod_direction_output(os05a20->reset_gpio, 1);
+	gpiod_set_value_cansleep(os05a20->reset_gpio, 1); /* assert reset (active-high) */
 
 	ret = regulator_bulk_enable(OS05A20_NUM_SUPPLIES, os05a20->supplies);
 	if (ret < 0) {
@@ -1093,11 +1130,11 @@ static int __os05a20_power_on(struct os05a20 *os05a20)
 	}
 
 	if (os05a20->reset_gpio)
-		gpiod_direction_output(os05a20->reset_gpio, 0);
+	gpiod_set_value_cansleep(os05a20->reset_gpio, 0); /* deassert reset */
 
 	usleep_range(500, 1000);
 	if (os05a20->pwdn_gpio)
-		gpiod_direction_output(os05a20->pwdn_gpio, 1);
+	gpiod_set_value_cansleep(os05a20->pwdn_gpio, 1); /* deassert PWDN (active-low) */
 	/*
 	 * There is no need to wait for the delay of RC circuit
 	 * if the reset signal is directly controlled by GPIO.
@@ -1126,14 +1163,15 @@ static void __os05a20_power_off(struct os05a20 *os05a20)
 
 
 	if (os05a20->pwdn_gpio)
-		gpiod_direction_output(os05a20->pwdn_gpio, 0);
+	gpiod_set_value_cansleep(os05a20->pwdn_gpio, 0); /* assert PWDN */
 
 	clk_disable_unprepare(os05a20->xvclk);
 
 	if (os05a20->reset_gpio)
-		gpiod_direction_output(os05a20->reset_gpio, 0);
+	gpiod_set_value_cansleep(os05a20->reset_gpio, 0);
 	if (os05a20->power_gpio)
 		gpiod_direction_output(os05a20->power_gpio, 0);
+	gpiod_set_value_cansleep(os05a20->power_gpio, 0);
 	if (!IS_ERR_OR_NULL(os05a20->pins_sleep)) {
 		ret = pinctrl_select_state(os05a20->pinctrl,
 					   os05a20->pins_sleep);
@@ -1223,6 +1261,7 @@ static const struct v4l2_subdev_pad_ops os05a20_pad_ops = {
 	.enum_mbus_code = os05a20_enum_mbus_code,
 	.enum_frame_size = os05a20_enum_frame_sizes,
 	.enum_frame_interval = os05a20_enum_frame_interval,
+	.get_frame_desc = os05a20_get_frame_desc,
 	.get_fmt = os05a20_get_fmt,
 	.set_fmt = os05a20_set_fmt,
 	.get_mbus_config = os05a20_g_mbus_config,
@@ -1672,10 +1711,3 @@ module_i2c_driver(os05a20_i2c_driver);
 
 MODULE_DESCRIPTION("OmniVision OS05A20 sensor driver");
 MODULE_LICENSE("GPL");
-
-/*
- * Note: Independent module senstar_r5_shmem provides /dev/senstar_r5_shmem
- * with ioctls to atomically clear/read shared memory flags when interacting
- * with the R5 core. Userland components should prefer that over ad-hoc
- * devmem2 calls to avoid cache coherency pitfalls.
- */
