@@ -902,40 +902,6 @@ static int os05a20_enum_frame_sizes(struct v4l2_subdev *sd,
 	return 0;
 }
 
-static int os05a20_get_frame_desc(struct v4l2_subdev *sd, unsigned int pad,
-								 struct v4l2_mbus_frame_desc *fd)
-{
-	struct v4l2_subdev_state *state;
-	struct v4l2_mbus_framefmt *fmt;
-	u32 bpp = 12;
-	int ret = 0;
-
-	if (pad != 0)
-		return -EINVAL;
-
-	state = v4l2_subdev_lock_and_get_active_state(sd);
-	fmt = v4l2_subdev_state_get_format(state, 0, 0);
-	if (!fmt) {
-		ret = -EPIPE;
-		goto out;
-	}
-
-	memset(fd, 0, sizeof(*fd));
-	fd->type = V4L2_MBUS_FRAME_DESC_TYPE_CSI2;
-
-	fd->entry[fd->num_entries].stream = 0;
-	fd->entry[fd->num_entries].flags = V4L2_MBUS_FRAME_DESC_FL_LEN_MAX;
-	fd->entry[fd->num_entries].length = fmt->width * fmt->height * bpp / 8;
-	fd->entry[fd->num_entries].pixelcode = fmt->code;
-	fd->entry[fd->num_entries].bus.csi2.vc = 0;
-	fd->entry[fd->num_entries].bus.csi2.dt = 0x2c; /* RAW12 */
-	fd->num_entries++;
-
-out:
-	v4l2_subdev_unlock_state(state);
-	return ret;
-}
-
 static int os05a20_enable_test_pattern(struct os05a20 *os05a20, u32 pattern)
 {
 	u32 val;
@@ -950,10 +916,20 @@ static int os05a20_enable_test_pattern(struct os05a20 *os05a20, u32 pattern)
 	return ret;
 }
 
-/* g_frame_interval not supported in this kernel; don't implement */
+/* g_frame_interval removed in newer kernels */
 
 static int os05a20_g_mbus_config(struct v4l2_subdev *sd, unsigned int pad_id,
 				struct v4l2_mbus_config *config)
+/* Advertise a stable frame interval to downstream capture */
+static int os05a20_g_frame_interval(struct v4l2_subdev *sd,
+									struct v4l2_subdev_frame_interval *fi)
+{
+	struct os05a20 *os05a20 = to_os05a20(sd);
+	const struct os05a20_mode *mode = os05a20->cur_mode;
+
+	fi->interval = mode->max_fps; /* 30 fps default */
+	return 0;
+}
 {
 	struct os05a20 *os05a20 = to_os05a20(sd);
 	const struct os05a20_mode *mode = os05a20->cur_mode;
@@ -1261,7 +1237,6 @@ static const struct v4l2_subdev_pad_ops os05a20_pad_ops = {
 	.enum_mbus_code = os05a20_enum_mbus_code,
 	.enum_frame_size = os05a20_enum_frame_sizes,
 	.enum_frame_interval = os05a20_enum_frame_interval,
-	.get_frame_desc = os05a20_get_frame_desc,
 	.get_fmt = os05a20_get_fmt,
 	.set_fmt = os05a20_set_fmt,
 	.get_mbus_config = os05a20_g_mbus_config,
