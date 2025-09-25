@@ -6,7 +6,33 @@
  * Based on Sony imx477 camera driver
  * Copyright (C) 2020 Raspberry Pi Ltd
  */
+#include <linux/version.h>
+#if __has_include(<linux/unaligned.h>)
 #include <linux/unaligned.h>
+#else
+#include <asm/unaligned.h>
+#endif
+
+/* ------------------------------------------------------------
+ * Kernel compatibility shims (targeting TI 6.1 kernel)
+ * ------------------------------------------------------------ */
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6,6,0)
+/* Upstream driver expects the newer helper names; map to older stream_* ones if present */
+#ifdef v4l2_subdev_state_get_stream_format
+#define v4l2_subdev_state_get_format v4l2_subdev_state_get_stream_format
+#endif
+#ifdef v4l2_subdev_state_get_stream_crop
+#define v4l2_subdev_state_get_crop v4l2_subdev_state_get_stream_crop
+#endif
+#endif /* < 6.6 */
+
+/* Some older media headers lack these meta bus format definitions */
+#ifndef MEDIA_BUS_FMT_META_8
+#define MEDIA_BUS_FMT_META_8 0x0901 /* fallback definition */
+#endif
+#ifndef MEDIA_BUS_FMT_SENSOR_DATA
+#define MEDIA_BUS_FMT_SENSOR_DATA MEDIA_BUS_FMT_META_8
+#endif
 #include <linux/clk.h>
 #include <linux/delay.h>
 #include <linux/gpio/consumer.h>
@@ -1006,40 +1032,38 @@ static void imx708_set_default_format(struct imx708 *imx708)
 static int imx708_open(struct v4l2_subdev *sd, struct v4l2_subdev_fh *fh)
 {
 	struct imx708 *imx708 = to_imx708(sd);
-	struct v4l2_mbus_framefmt *try_fmt_img =
-		v4l2_subdev_state_get_format(fh->state, IMAGE_PAD);
-	struct v4l2_mbus_framefmt *try_fmt_meta =
-		v4l2_subdev_state_get_format(fh->state, METADATA_PAD);
-	struct v4l2_rect *try_crop;
-
 	mutex_lock(&imx708->mutex);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6,6,0)
+	{
+		struct v4l2_mbus_framefmt *try_fmt_img =
+			v4l2_subdev_state_get_format(fh->state, IMAGE_PAD);
+		struct v4l2_mbus_framefmt *try_fmt_meta =
+			v4l2_subdev_state_get_format(fh->state, METADATA_PAD);
+		struct v4l2_rect *try_crop;
 
-	/* Initialize try_fmt for the image pad */
-	if (imx708->hdr_mode->val) {
-		try_fmt_img->width = supported_modes_10bit_hdr[0].width;
-		try_fmt_img->height = supported_modes_10bit_hdr[0].height;
-	} else {
-		try_fmt_img->width = supported_modes_10bit_no_hdr[0].width;
-		try_fmt_img->height = supported_modes_10bit_no_hdr[0].height;
+		if (imx708->hdr_mode->val) {
+			try_fmt_img->width = supported_modes_10bit_hdr[0].width;
+			try_fmt_img->height = supported_modes_10bit_hdr[0].height;
+		} else {
+			try_fmt_img->width = supported_modes_10bit_no_hdr[0].width;
+			try_fmt_img->height = supported_modes_10bit_no_hdr[0].height;
+		}
+		try_fmt_img->code = imx708_get_format_code(imx708);
+		try_fmt_img->field = V4L2_FIELD_NONE;
+
+		try_fmt_meta->width = IMX708_EMBEDDED_LINE_WIDTH;
+		try_fmt_meta->height = IMX708_NUM_EMBEDDED_LINES;
+		try_fmt_meta->code = MEDIA_BUS_FMT_SENSOR_DATA;
+		try_fmt_meta->field = V4L2_FIELD_NONE;
+
+		try_crop = v4l2_subdev_state_get_crop(fh->state, IMAGE_PAD);
+		try_crop->left = IMX708_PIXEL_ARRAY_LEFT;
+		try_crop->top = IMX708_PIXEL_ARRAY_TOP;
+		try_crop->width = IMX708_PIXEL_ARRAY_WIDTH;
+		try_crop->height = IMX708_PIXEL_ARRAY_HEIGHT;
 	}
-	try_fmt_img->code = imx708_get_format_code(imx708);
-	try_fmt_img->field = V4L2_FIELD_NONE;
-
-	/* Initialize try_fmt for the embedded metadata pad */
-	try_fmt_meta->width = IMX708_EMBEDDED_LINE_WIDTH;
-	try_fmt_meta->height = IMX708_NUM_EMBEDDED_LINES;
-	try_fmt_meta->code = MEDIA_BUS_FMT_SENSOR_DATA;
-	try_fmt_meta->field = V4L2_FIELD_NONE;
-
-	/* Initialize try_crop */
-	try_crop = v4l2_subdev_state_get_crop(fh->state, IMAGE_PAD);
-	try_crop->left = IMX708_PIXEL_ARRAY_LEFT;
-	try_crop->top = IMX708_PIXEL_ARRAY_TOP;
-	try_crop->width = IMX708_PIXEL_ARRAY_WIDTH;
-	try_crop->height = IMX708_PIXEL_ARRAY_HEIGHT;
-
+#endif
 	mutex_unlock(&imx708->mutex);
-
 	return 0;
 }
 
@@ -1354,23 +1378,22 @@ static int imx708_get_pad_format(struct v4l2_subdev *sd,
 
 	mutex_lock(&imx708->mutex);
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6,6,0)
 	if (fmt->which == V4L2_SUBDEV_FORMAT_TRY) {
 		struct v4l2_mbus_framefmt *try_fmt =
-			v4l2_subdev_state_get_format(sd_state,
-						   fmt->pad);
-		/* update the code which could change due to vflip or hflip */
-		try_fmt->code = fmt->pad == IMAGE_PAD ?
-				imx708_get_format_code(imx708) :
-				MEDIA_BUS_FMT_SENSOR_DATA;
+			v4l2_subdev_state_get_format(sd_state, fmt->pad);
+		try_fmt->code = (fmt->pad == IMAGE_PAD) ?
+			imx708_get_format_code(imx708) : MEDIA_BUS_FMT_SENSOR_DATA;
 		fmt->format = *try_fmt;
+		mutex_unlock(&imx708->mutex);
+		return 0;
+	}
+#endif
+	if (fmt->pad == IMAGE_PAD) {
+		imx708_update_image_pad_format(imx708, imx708->mode, fmt);
+		fmt->format.code = imx708_get_format_code(imx708);
 	} else {
-		if (fmt->pad == IMAGE_PAD) {
-			imx708_update_image_pad_format(imx708, imx708->mode,
-						       fmt);
-			fmt->format.code = imx708_get_format_code(imx708);
-		} else {
-			imx708_update_metadata_pad_format(fmt);
-		}
+		imx708_update_metadata_pad_format(fmt);
 	}
 
 	mutex_unlock(&imx708->mutex);
@@ -1391,38 +1414,32 @@ static int imx708_set_pad_format(struct v4l2_subdev *sd,
 	mutex_lock(&imx708->mutex);
 
 	if (fmt->pad == IMAGE_PAD) {
-		const struct imx708_mode *mode_list;
-		unsigned int num_modes;
-
-		/* Bayer order varies with flips */
+		const struct imx708_mode *mode_list; unsigned int num_modes;
 		fmt->format.code = imx708_get_format_code(imx708);
-
-		get_mode_table(fmt->format.code, &mode_list, &num_modes,
-			       imx708->hdr_mode->val);
-
-		mode = v4l2_find_nearest_size(mode_list,
-					      num_modes,
-					      width, height,
-					      fmt->format.width,
-					      fmt->format.height);
+		get_mode_table(fmt->format.code, &mode_list, &num_modes, imx708->hdr_mode->val);
+		mode = v4l2_find_nearest_size(mode_list, num_modes, width, height,
+									  fmt->format.width, fmt->format.height);
 		imx708_update_image_pad_format(imx708, mode, fmt);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6,6,0)
 		if (fmt->which == V4L2_SUBDEV_FORMAT_TRY) {
-			framefmt = v4l2_subdev_state_get_format(sd_state,
-							      fmt->pad);
+			framefmt = v4l2_subdev_state_get_format(sd_state, fmt->pad);
 			*framefmt = fmt->format;
-		} else {
-			imx708->mode = mode;
-			imx708_set_framing_limits(imx708);
+			mutex_unlock(&imx708->mutex);
+			return 0;
 		}
+#endif
+		imx708->mode = mode;
+		imx708_set_framing_limits(imx708);
 	} else {
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6,6,0)
 		if (fmt->which == V4L2_SUBDEV_FORMAT_TRY) {
-			framefmt = v4l2_subdev_state_get_format(sd_state,
-							      fmt->pad);
+			framefmt = v4l2_subdev_state_get_format(sd_state, fmt->pad);
 			*framefmt = fmt->format;
-		} else {
-			/* Only one embedded data mode is supported */
-			imx708_update_metadata_pad_format(fmt);
+			mutex_unlock(&imx708->mutex);
+			return 0;
 		}
+#endif
+		imx708_update_metadata_pad_format(fmt);
 	}
 
 	mutex_unlock(&imx708->mutex);
@@ -1432,16 +1449,18 @@ static int imx708_set_pad_format(struct v4l2_subdev *sd,
 
 static const struct v4l2_rect *
 __imx708_get_pad_crop(struct imx708 *imx708, struct v4l2_subdev_state *sd_state,
-		      unsigned int pad, enum v4l2_subdev_format_whence which)
+		  unsigned int pad, enum v4l2_subdev_format_whence which)
 {
 	switch (which) {
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6,6,0)
 	case V4L2_SUBDEV_FORMAT_TRY:
 		return v4l2_subdev_state_get_crop(sd_state, pad);
+#endif
 	case V4L2_SUBDEV_FORMAT_ACTIVE:
 		return &imx708->mode->crop;
+	default:
+		return NULL;
 	}
-
-	return NULL;
 }
 
 static int imx708_get_selection(struct v4l2_subdev *sd,
@@ -1981,7 +2000,7 @@ error_out:
 	return ret;
 }
 
-static int imx708_probe(struct i2c_client *client)
+static int imx708_probe(struct i2c_client *client, const struct i2c_device_id *id)
 {
 	struct device *dev = &client->dev;
 	struct imx708 *imx708;
@@ -2108,14 +2127,21 @@ static const struct dev_pm_ops imx708_pm_ops = {
 	SET_RUNTIME_PM_OPS(imx708_power_off, imx708_power_on, NULL)
 };
 
+static const struct i2c_device_id imx708_id_table[] = {
+	{ "imx708", 0 },
+	{ }
+};
+MODULE_DEVICE_TABLE(i2c, imx708_id_table);
+
 static struct i2c_driver imx708_i2c_driver = {
 	.driver = {
 		.name = "imx708",
-		.of_match_table	= imx708_dt_ids,
+		.of_match_table = imx708_dt_ids,
 		.pm = &imx708_pm_ops,
 	},
 	.probe = imx708_probe,
 	.remove = imx708_remove,
+	.id_table = imx708_id_table,
 };
 
 module_i2c_driver(imx708_i2c_driver);

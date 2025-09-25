@@ -921,10 +921,8 @@ static int os05a20_enable_test_pattern(struct os05a20 *os05a20, u32 pattern)
 /* g_frame_interval removed in newer kernels */
 
 static int os05a20_g_mbus_config(struct v4l2_subdev *sd, unsigned int pad_id,
-				struct v4l2_mbus_config *config)
+			struct v4l2_mbus_config *config)
 {
-	struct os05a20 *os05a20 = to_os05a20(sd);
-	const struct os05a20_mode *mode = os05a20->cur_mode;
 	config->type = V4L2_MBUS_CSI2_DPHY;
 	/* Always advertise 4 CSI-2 lanes; continuous clock is default (flags=0) */
 	config->bus.mipi_csi2.num_data_lanes = OS05A20_LANES;
@@ -1174,8 +1172,7 @@ static int os05a20_runtime_suspend(struct device *dev)
 static int os05a20_open(struct v4l2_subdev *sd, struct v4l2_subdev_fh *fh)
 {
 	struct os05a20 *os05a20 = to_os05a20(sd);
-	struct v4l2_mbus_framefmt *try_fmt = NULL;
-	const struct os05a20_mode *def_mode = &supported_modes[0];
+	/* No per-filehandle try_fmt handling needed on this kernel */
 
 	mutex_lock(&os05a20->mutex);
 	/* Initialize try_fmt */
@@ -1490,7 +1487,7 @@ static int os05a20_configure_regulators(struct os05a20 *os05a20)
 				       os05a20->supplies);
 }
 
-static int os05a20_probe(struct i2c_client *client)
+static int os05a20_probe(struct i2c_client *client, const struct i2c_device_id *id)
 {
 	struct device *dev = &client->dev;
 	struct device_node *node = dev->of_node;
@@ -1669,9 +1666,9 @@ static struct i2c_driver os05a20_i2c_driver = {
 		.pm = &os05a20_pm_ops,
 		.of_match_table = of_match_ptr(os05a20_of_match),
 	},
-	.probe		= &os05a20_probe,
-	.remove	= &os05a20_remove,
-	.id_table	= os05a20_match_id,
+	.probe = os05a20_probe,
+	.remove = os05a20_remove,
+	.id_table = os05a20_match_id,
 };
 
 module_i2c_driver(os05a20_i2c_driver);
