@@ -6,6 +6,7 @@
 *.mod.c
 *.symvers
 *.cmd
+*.d
 
 modules.order
 Module.symvers
@@ -20,4 +21,3 @@ oe-workdir/
 *.swo
 .DS_Store
 
-!*.c

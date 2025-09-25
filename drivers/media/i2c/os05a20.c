@@ -26,15 +26,17 @@
 #include <linux/pinctrl/consumer.h>
 /* Removed Rockchip-specific pre-ISP and thunderboot headers */
 
-#define DRIVER_VERSION			KERNEL_VERSION(0, 0x01, 0x01)
+#define DRIVER_VERSION			KERNEL_VERSION(0, 0x01, 0x02)
 
 #ifndef V4L2_CID_DIGITAL_GAIN
 #define V4L2_CID_DIGITAL_GAIN		V4L2_CID_GAIN
 #endif
 
-#define MIPI_FREQ_750M			750000000
+// For some reason, on the TI platform, it's always 1/2 of the actual rate..maybe DDR ? 
+// Leaving it at the original makes the CSI peripheral fail to lock
+#define MIPI_FREQ					375000000
 
-#define PIXEL_RATE_WITH_750M		(MIPI_FREQ_750M * 2 / 12 * 4)
+#define PIXEL_RATE					(MIPI_FREQ * 2 / 12 * 4)
 
 /* Runtime HDR mode selection (no DT property) */
 static int os05a20_hdr_default;
@@ -689,7 +691,7 @@ static const struct os05a20_mode supported_modes[] = {
 };
 
 static const s64 link_freq_menu_items[] = {
-	MIPI_FREQ_750M,
+	MIPI_FREQ,
 };
 
 static const char * const os05a20_test_pattern_menu[] = {
@@ -920,16 +922,6 @@ static int os05a20_enable_test_pattern(struct os05a20 *os05a20, u32 pattern)
 
 static int os05a20_g_mbus_config(struct v4l2_subdev *sd, unsigned int pad_id,
 				struct v4l2_mbus_config *config)
-/* Advertise a stable frame interval to downstream capture */
-static int os05a20_g_frame_interval(struct v4l2_subdev *sd,
-									struct v4l2_subdev_frame_interval *fi)
-{
-	struct os05a20 *os05a20 = to_os05a20(sd);
-	const struct os05a20_mode *mode = os05a20->cur_mode;
-
-	fi->interval = mode->max_fps; /* 30 fps default */
-	return 0;
-}
 {
 	struct os05a20 *os05a20 = to_os05a20(sd);
 	const struct os05a20_mode *mode = os05a20->cur_mode;
@@ -1407,8 +1399,8 @@ static int os05a20_initialize_controls(struct os05a20 *os05a20)
 	/* pixel rate = link frequency * 2 * lanes / BITS_PER_SAMPLE */
 	os05a20->pixel_rate = v4l2_ctrl_new_std(handler, NULL,
 			V4L2_CID_PIXEL_RATE,
-			0, PIXEL_RATE_WITH_750M,
-			1, PIXEL_RATE_WITH_750M);
+			0, PIXEL_RATE			,
+			1, PIXEL_RATE			);
 
 	h_blank = mode->hts_def - mode->width;
 	os05a20->hblank = v4l2_ctrl_new_std(handler, NULL, V4L2_CID_HBLANK,
