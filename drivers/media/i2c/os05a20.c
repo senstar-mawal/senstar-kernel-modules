@@ -26,7 +26,7 @@
 #include <linux/pinctrl/consumer.h>
 /* Removed Rockchip-specific pre-ISP and thunderboot headers */
 
-#define DRIVER_VERSION			KERNEL_VERSION(0, 0x01, 0x02)
+#define DRIVER_VERSION			KERNEL_VERSION(0, 0x01, 0x04)
 
 #ifndef V4L2_CID_DIGITAL_GAIN
 #define V4L2_CID_DIGITAL_GAIN		V4L2_CID_GAIN
@@ -1148,6 +1148,10 @@ static void __os05a20_power_off(struct os05a20 *os05a20)
 	}
 
 	regulator_bulk_disable(OS05A20_NUM_SUPPLIES, os05a20->supplies);
+
+	/* 512 XVCLK cycles according to datasheet to 'avoid bad mipi data' */
+	u32 delay_us = os05a20_cal_delay(512);
+	usleep_range(delay_us, delay_us * 2);
 }
 
 static int os05a20_runtime_resume(struct device *dev)
@@ -1532,19 +1536,20 @@ static int os05a20_probe(struct i2c_client *client)
 		return -EINVAL;
 	}
 
-	os05a20->power_gpio = devm_gpiod_get(dev, "power", GPIOD_ASIS);
+	// set gpio from a known state; otherwise the sensor has trouble probing
+	os05a20->power_gpio = devm_gpiod_get(dev, "power", GPIOD_OUT_LOW);
 	if (IS_ERR(os05a20->power_gpio)) {
 		dev_warn(dev, "Power GPIO not available; continuing without it\n");
 		os05a20->power_gpio = NULL;
 	}
 
-	os05a20->reset_gpio = devm_gpiod_get(dev, "reset", GPIOD_ASIS);
+	os05a20->reset_gpio = devm_gpiod_get(dev, "reset", GPIOD_OUT_LOW);
 	if (IS_ERR(os05a20->reset_gpio)) {
 		dev_warn(dev, "Reset GPIO not available; continuing without it\n");
 		os05a20->reset_gpio = NULL;
 	}
 
-	os05a20->pwdn_gpio = devm_gpiod_get(dev, "pwdn", GPIOD_ASIS);
+	os05a20->pwdn_gpio = devm_gpiod_get(dev, "pwdn", GPIOD_OUT_HIGH);
 	if (IS_ERR(os05a20->pwdn_gpio)) {
 		dev_warn(dev, "PWDN GPIO not available; continuing without it\n");
 		os05a20->pwdn_gpio = NULL;
@@ -1580,6 +1585,9 @@ static int os05a20_probe(struct i2c_client *client)
 	ret = os05a20_initialize_controls(os05a20);
 	if (ret)
 		goto err_destroy_mutex;
+
+	// Deterministic: start from power off state
+	__os05a20_power_off(os05a20);
 
 	ret = __os05a20_power_on(os05a20);
 	if (ret)
