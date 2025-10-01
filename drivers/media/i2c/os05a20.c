@@ -1102,7 +1102,8 @@ static int __os05a20_power_on(struct os05a20 *os05a20)
 
 	usleep_range(500, 1000);
 	if (os05a20->pwdn_gpio)
-	gpiod_set_value_cansleep(os05a20->pwdn_gpio, 1); /* deassert PWDN (active-low) */
+		/* Drive low to leave standby; PWDN is active-high per datasheet */
+		gpiod_set_value_cansleep(os05a20->pwdn_gpio, 0);
 	/*
 	 * There is no need to wait for the delay of RC circuit
 	 * if the reset signal is directly controlled by GPIO.
@@ -1131,7 +1132,8 @@ static void __os05a20_power_off(struct os05a20 *os05a20)
 
 
 	if (os05a20->pwdn_gpio)
-	gpiod_set_value_cansleep(os05a20->pwdn_gpio, 0); /* assert PWDN */
+		/* Assert standby when powering off (active-high) */
+		gpiod_set_value_cansleep(os05a20->pwdn_gpio, 1);
 
 	clk_disable_unprepare(os05a20->xvclk);
 
